@@ -98,3 +98,19 @@ for k in modelo.asignaturas:
             hora_siguiente = horas_ordenadas[j + 1]
             modelo.restriccion_bloques_consecutivos.add(modelo.asignacion_horario[i, hora_actual, k] - modelo.asignacion_horario[i, hora_siguiente, k] <= 1 - modelo.asignacion_horario[i, hora_siguiente, k])
             modelo.restriccion_bloques_consecutivos.add(-modelo.asignacion_horario[i, hora_actual, k] + modelo.asignacion_horario[i, hora_siguiente, k] <= modelo.asignacion_horario[i, hora_actual, k])
+
+def funcion_objetivo(modelo):
+    return sum(modelo.preferencias[i, j, k] * modelo.asignacion_horario[i, j, k] for i in modelo.dias for j in modelo.horas for k in modelo.asignaturas)
+
+modelo.objetivo = pyo.Objective(rule=funcion_objetivo, sense=pyo.minimize)
+
+# Resolver el modelo
+optimizador = pyo.SolverFactory('glpk')
+resultado = optimizador.solve(modelo)
+
+# Imprimir resultados
+if resultado.solver.status == pyo.SolverStatus.ok and resultado.solver.termination_condition == pyo.TerminationCondition.optimal:
+    print("El problema se resolvió de manera óptima.")
+    print("Valor de la función objetivo:", pyo.value(modelo.objetivo))
+else:
+    print("No se pudo encontrar una solución óptima.")
