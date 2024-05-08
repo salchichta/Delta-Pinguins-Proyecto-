@@ -1,57 +1,120 @@
-import pyomo.environ as pyo
+import streamlit as st
+import pandas as pd
+import numpy as np
 
-# Creación del modelo
-modelo = pyo.ConcreteModel()
+def getData():
+    df = pd.read_excel('calculadoraHorarios.xlsx')
+    rename = {'Materias que puede dar cada profesor': 'Materias profesor', 
+              'Disponibilidad de horario de cada profesor': 'Horarios profesor'}
+    df.rename(columns=rename,inplace=True)
+    return df
 
-# Sets
-modelo.dias = pyo.Set(initialize=days)
-modelo.horas = pyo.Set(initialize=hours)
-modelo.hora_ocupada = pyo.Set(initialize=subjects)
 
-# Parámetros
-modelo.horas_por_orario = pyo.Param(modelo.hora_ocupada, initialize=hours_per_subject)
-modelo.min_dias = pyo.Param(modelo.hora_ocupada, initialize=min_days_per_subject)
-modelo.max_dias = pyo.Param(modelo.hora_ocupada, initialize=max_days_per_subject)
-modelo.preferencias = pyo.Param(modelo.dias, modelo.horas, modelo.hora_ocupada, initialize=preferences)
+def getMaterias(df):
+    materias = df[['Profesores','Materias profesor']]
+    materias.set_index('Profesores',inplace=True)
 
-# Variables de decisión
-modelo.vbSubjectSchedule = pyo.Var(modelo.dias, modelo.horas, modelo.hora_ocupada, domain=pyo.Binary)
+    for i in range(len(df.index)):
+        materias['Materias profesor'][i] = list(materias['Materias profesor'][i])
 
-# Restricciones
-# Asignación única
-modelo.ctOnlyOneSubject = pyo.ConstraintList()
-for i in modelo.dias:
-    for j in modelo.horas:
-        modelo.ctOnlyOneSubject.add(sum(modelo.vbSubjectSchedule[i, j, k] for k in modelo.hora_ocupada) <= 1)
+    materias = materias.explode('Materias profesor')
+    materias = pd.get_dummies(materias,prefix='',prefix_sep='')
+    materias = materias.groupby(level=0).sum()
 
-# Impartir exactamente el número de horas lectivas de cada asignatura
-modelo.ctCoverAllHours = pyo.ConstraintList()
-for k in modelo.hora_ocupada:
-    modelo.ctCoverAllHours.add(sum(modelo.vbSubjectSchedule[i, j, k] for i in modelo.dias for j in modelo.horas) == modelo.horas_por_orario[k])
+    return materias
 
-# Respetar el máximo de horas lectivas por asignatura diario
-modelo.ctMaxDailyHours = pyo.ConstraintList()
-for k in modelo.hora_ocupada:
-    for i in modelo.dias:
-        modelo.ctMaxDailyHours.add(sum(modelo.vbSubjectSchedule[i, j, k] for j in modelo.horas) <= max_hours_per_day)
+def getHorarios(df):
+    horarios = df[['Profesores','Horarios profesor']]
+    horarios.set_index('Profesores',inplace=True)
 
-# Restricción de apoyo para la variable indicativa
-modelo.ctSubjectDaysFlags = pyo.ConstraintList()
-for k in modelo.hora_ocupada:
-    for i in modelo.dias:
-        modelo.ctSubjectDaysFlags.add(max_hours_per_day * modelo.vbSubjectDaysFlags[i, k] >= sum(modelo.vbSubjectSchedule[i, j, k] for j in modelo.horas))
+    horarios = horarios.astype({'Horarios profesor':'string'})
+    hlist =[]
 
-# Máximo y mínimo número de días lectivos por asignatura
-modelo.ctSubjectDays = pyo.ConstraintList()
-for k in modelo.hora_ocupada:
-    modelo.ctSubjectDays.add(sum(modelo.vbSubjectDaysFlags[i, k] for i in modelo.dias) <= modelo.max_dias[k])
-    modelo.ctSubjectDays.add(sum(modelo.vbSubjectDaysFlags[i, k] for i in modelo.dias) >= modelo.min_dias[k])
+    for i in range(len(df.index)):
+        hlist.append(list(horarios['Horarios profesor'][i]))
 
-# Asignaciones en bloques horarios consecutivos
-modelo.ctSubjectSwitches = pyo.ConstraintList()
-for k in modelo.hora_ocupada:
-    for i in modelo.dias:
-        for j in modelo.horas:
-            modelo.ctSubjectSwitches.add(modelo.vbSubjectSchedule[i, j, k] - modelo.vbSubjectSchedule[i, modelo.horas.prevw(j), k] <= modelo.vbSubjectSwitches[i, j, k])
-            modelo.ctSubjectSwitches.add(-modelo.vbSubjectSchedule[i, j, k] + modelo.vbSubjectSchedule[i, modelo.horas.prevw(j), k] <= modelo.vbSubjectSwitches[i, j, k])
-        modelo.ctSubjectSwitches.add(sum(modelo.vbSubjectSwitches[i, j,
+    horarios['Horarios'] = hlist
+    horarios.drop(columns='Horarios profesor',inplace=True)
+
+    horarios = horarios.explode('Horarios')
+    horarios = pd.get_dummies(horarios,prefix='',prefix_sep='')
+    horarios = horarios.groupby(level=0).sum()
+    for i in range(len(df.index)):
+        horarios.iloc[i] *= df['Costos Profesores'].iloc[i]
+
+    for i in range(len(df.index)):
+        for j in range(len(df.index)):
+            if (horarios[str(i+1)][j] > 0):
+                horarios[str(i+1)][j] += df['Costos Horarios'][i]
+    horarios.replace(0, np.nan, inplace=True)
+
+    return horarios
+
+def minimoMateria(materia,materias,horarios):
+    profesores = materias[materias[materia] == 1].index
+    select = [x in profesores for x in horarios.index]
+    k = horarios[select]
+    hor = k.min().idxmin()
+    prof = k[k[hor] == k.min().min()].index[0]
+    horarios.loc[:,hor][prof] = np.nan
+    return (materia,prof,hor,k.min().min())
+
+def getHorarioOptimo(df):
+    materias = getMaterias(df)
+    horarios = getHorarios(df)
+
+    minimos = []
+
+    for i in range(len(df.index)):
+        minimos.append(minimoMateria(df['Materias'].iloc[i],materias,horarios))
+
+    seleccion = pd.DataFrame(minimos, columns=['Materia','Profesor','Horario','Costo'])
+    seleccion.loc[:,'Costo'] = seleccion['Costo'] + df['Costos Materias']
+
+    salones = df[['Salones','Costos Salones']]
+    salones = salones.sort_values(by='Costos Salones')
+
+    sel_hor = seleccion['Horario'].value_counts()
+    seleccion['Salon'] = 'x'
+    sel_salon = []
+
+    for horario in sel_hor.index:
+        indice = seleccion[seleccion['Horario'] == str(horario)].index
+        for i in range(len(indice)):
+            seleccion.loc[indice[i],'Salon'] = salones['Salones'].iloc[i]
+            seleccion.loc[indice[i],'Costo'] += salones['Costos Salones'].iloc[i]
+    
+    return seleccion
+
+st.set_page_config(
+    page_title='Horario Óptimo',
+    layout='wide',
+)
+
+st.title('Calculadora de Horario Óptimo')
+
+st.text('''Esta calculadora te permitirá encontrar la programación de horario óptima para las clases. Ya se encuentra un horario 
+preestablecido, pero puedes modificar las restricciones de horarios, materias y costos, así como los nombres de los 
+profesores.''')
+        
+st.text('Para que la calculadora funcione correctamente, deben escribirse los nombres de los profesores alfabéticamente.')
+
+df = getData()
+dfEditado = st.experimental_data_editor(df)
+horarioFinal = getHorarioOptimo(dfEditado)
+horarioFinal.to_excel('horarioFinal.xlsx',index=False)
+
+st.text('De acuerdo a la información presentada, el horario óptimo es el siguiente.')
+
+st.dataframe(horarioFinal)
+
+costo = horarioFinal['Costo'].sum()*1000
+st.text(f'El costo asociado a este horario es de {costo}')
+
+with open('horarioFinal.xlsx', "rb") as template_file:
+        template_byte = template_file.read()
+
+st.download_button(label="Descargar horario",
+                    data=template_byte,
+                    file_name="horarioFinal.xlsx",
+                    mime='application/octet-stream')
