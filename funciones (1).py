@@ -1,4 +1,4 @@
-from py.cursos import arreglo_cursos
+from cursos import arreglo_cursos
 
 
 def dataframe_limpio(df):
